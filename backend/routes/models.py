@@ -1,6 +1,7 @@
 """Model management endpoints."""
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from ..services.task_queue import create_background_task
 from ..utils.progress import get_progress_manager
 from ..utils.tasks import get_task_manager
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -407,6 +409,18 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
             if asyncio.iscoroutine(result):
                 await result
             task_manager.complete_download(request.model_name)
+            # Auto-create voice profiles for engines with public preset catalogs
+            if config.engine in ("kokoro", "qwen_custom_voice"):
+                from ..services.profiles import seed_preset_profiles
+
+                try:
+                    seed_preset_profiles(config.engine)
+                except Exception as seed_err:
+                    logger.warning(
+                        "Failed to seed %s preset profiles after download: %s",
+                        config.engine,
+                        seed_err,
+                    )
         except Exception as e:
             task_manager.error_download(request.model_name, str(e))
 
