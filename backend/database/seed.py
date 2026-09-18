@@ -71,3 +71,16 @@ def seed_builtin_presets(SessionLocal, EffectPreset) -> None:
         db.commit()
     finally:
         db.close()
+
+
+def seed_preset_voice_profiles(SessionLocal) -> None:
+    """Ensure public preset TTS voices (Kokoro, Qwen CustomVoice) exist as profiles."""
+    from ..services.profiles import seed_all_preset_profiles
+
+    db = SessionLocal()
+    try:
+        created = seed_all_preset_profiles(db)
+        if created:
+            logger.info("Seeded %d built-in preset voice profile(s)", created)
+    finally:
+        db.close()

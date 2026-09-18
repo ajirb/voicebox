@@ -708,3 +708,127 @@ async def delete_avatar(
     db.commit()
 
     return True
+
+
+_LANG_LABELS = {
+    "es": "Spanish",
+    "fr": "French",
+    "hi": "Hindi",
+    "it": "Italian",
+    "ja": "Japanese",
+    "pt": "Portuguese",
+    "zh": "Chinese",
+    "ko": "Korean",
+}
+
+
+def _preset_profile_name(voice_id: str, display_name: str, language: str) -> str:
+    """Build a unique, human-readable profile name for a preset voice."""
+    if voice_id.startswith(("bf_", "bm_")):
+        return f"{display_name} (British)"
+    if language != "en":
+        label = _LANG_LABELS.get(language)
+        if label:
+            return f"{display_name} ({label})"
+    return display_name
+
+
+def _iter_preset_catalog(engine: str):
+    """Yield (voice_id, display_name, language, description) for a preset engine."""
+    if engine == "kokoro":
+        from ..backends.kokoro_backend import KOKORO_VOICES
+
+        for voice_id, display_name, gender, language in KOKORO_VOICES:
+            accent = "British" if voice_id.startswith(("bf_", "bm_")) else (
+                "American" if language == "en" else _LANG_LABELS.get(language, language)
+            )
+            description = f"Kokoro built-in {gender} voice ({accent})"
+            yield voice_id, display_name, language, description
+        return
+
+    if engine == "qwen_custom_voice":
+        from ..backends.qwen_custom_voice_backend import QWEN_CUSTOM_VOICES
+
+        for voice_id, display_name, _gender, language, description in QWEN_CUSTOM_VOICES:
+            yield voice_id, display_name, language, description
+
+
+def seed_preset_profiles(engine: str, db: Session | None = None) -> int:
+    """Idempotently create a VoiceProfile for each preset voice in an engine catalog.
+
+    Returns the number of newly created profiles. Safe to call on every startup
+    and after model downloads.
+    """
+    owns_session = db is None
+    if owns_session:
+        from ..database import session as db_session
+
+        if db_session.SessionLocal is None:
+            logger.warning("Cannot seed preset profiles: database not initialized")
+            return 0
+        db = db_session.SessionLocal()
+
+    created = 0
+    try:
+        catalog = list(_iter_preset_catalog(engine))
+        if not catalog:
+            return 0
+
+        for voice_id, display_name, language, description in catalog:
+            existing = (
+                db.query(DBVoiceProfile)
+                .filter_by(
+                    voice_type="preset",
+                    preset_engine=engine,
+                    preset_voice_id=voice_id,
+                )
+                .first()
+            )
+            if existing:
+                continue
+
+            name = _preset_profile_name(voice_id, display_name, language)
+            if db.query(DBVoiceProfile).filter_by(name=name).first():
+                # Name taken by a user profile — disambiguate with engine.
+                name = f"{name} · {engine}"
+                if db.query(DBVoiceProfile).filter_by(name=name).first():
+                    continue
+
+            profile = DBVoiceProfile(
+                id=str(uuid.uuid4()),
+                name=name,
+                description=description,
+                language=language,
+                voice_type="preset",
+                preset_engine=engine,
+                preset_voice_id=voice_id,
+                default_engine=engine,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            db.add(profile)
+
+            profile_dir = config.get_profiles_dir() / profile.id
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            created += 1
+
+        if created:
+            db.commit()
+            logger.info("Seeded %d %s preset voice profile(s)", created, engine)
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to seed preset profiles for engine %s", engine)
+        raise
+    finally:
+        if owns_session:
+            db.close()
+
+    return created
+
+
+def seed_all_preset_profiles(db: Session | None = None) -> int:
+    """Seed preset profiles for every engine that ships a public voice catalog."""
+    total = 0
+    for engine in ("kokoro", "qwen_custom_voice"):
+        total += seed_preset_profiles(engine, db)
+    return total
